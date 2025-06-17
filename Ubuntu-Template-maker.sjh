@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Base URL for cloud-init images
+BASE_URL="https://cloud-images.ubuntu.com/releases"
+
+# Valid Ubuntu versions (extend as needed)
+VALID_VERSIONS=(
+  "16.04"
+  "18.04"
+  "20.04"
+  "22.04"
+  "23.10"
+  "24.04"
+)
+
+# Ask for Ubuntu version
+echo "Available Ubuntu versions: ${VALID_VERSIONS[*]}"
+read -p "Enter Ubuntu version (e.g., 22.04): " UBUNTU_VERSION
+
+# Validate input version
+if [[ ! " ${VALID_VERSIONS[*]} " =~ " ${UBUNTU_VERSION} " ]]; then
+  echo "❌ Error: Invalid Ubuntu version. Please enter one of: ${VALID_VERSIONS[*]}"
+  exit 1
+fi
+
+# Ask for storage
+read -p "Enter Proxmox storage name (e.g., local-lvm): " STORAGE
+
+# Find next available VMID starting from 9001
+START_VMID=9001
+while qm status $START_VMID &> /dev/null; do
+  ((START_VMID++))
+done
+
+VMID=$START_VMID
+VMNAME="ubuntu-${UBUNTU_VERSION}-template"
+IMG_FILE="ubuntu-${UBUNTU_VERSION}-server-cloudimg-amd64.img"
+DOWNLOAD_URL="${BASE_URL}/${UBUNTU_VERSION}/release/${IMG_FILE}"
+
+echo "➡️ Using VMID: $VMID"
+echo "⬇️ Downloading Ubuntu ${UBUNTU_VERSION} cloud image..."
+wget -O $IMG_FILE $DOWNLOAD_URL
+
+if [[ $? -ne 0 ]]; then
+  echo "❌ Failed to download the image. Please check the version or your internet connection."
+  exit 1
+fi
+
+echo "🚀 Creating VM in Proxmox..."
+qm create $VMID \
+  --name $VMNAME \
+  --memory 2048 \
+  --cores 2 \
+  --net0 virtio,bridge=vmbr0 \
+  --serial0 socket \
+  --boot c \
+  --bootdisk scsi0 \
+  --scsihw virtio-scsi-pci \
+  --ide2 $STORAGE:cloudinit \
+  --ostype l26
+
+echo "💾 Importing disk to Proxmox storage..."
+qm importdisk $VMID $IMG_FILE $STORAGE --format qcow2
+
+echo "🔧 Attaching imported disk to VM..."
+qm set $VMID --scsi0 $STORAGE:vm-${VMID}-disk-0
+
+echo "🛠️ Adding cloud-init configuration..."
+qm set $VMID \
+  --ciuser ubuntu \
+  --cipassword ubuntu \
+  --ipconfig0 ip=dhcp \
+  --vga Default
+
+echo "📦 Converting VM to template..."
+qm template $VMID
+
+echo "✅ Template created: $VMNAME (VMID: $VMID)"
